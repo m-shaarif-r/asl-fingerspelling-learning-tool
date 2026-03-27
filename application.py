@@ -4,7 +4,14 @@ import numpy as np
 import torch
 import mediapipe as mp
 import time
-from inference_post_training import model, detector, device, labels, offset
+
+# -------------------- LAZY LOAD (NEW) --------------------
+@st.cache_resource
+def load_resources():
+    from inference_post_training import model, detector, device, labels, offset
+    return model, detector, device, labels, offset
+
+model = detector = device = labels = offset = None
 
 # --------------------UI Setup--------------------
 st.set_page_config(page_title = "ASL (Sign language) Learning Tool")
@@ -36,15 +43,18 @@ with col5:
         st.session_state.target_label = "W"
 
 target_label = st.session_state.target_label
-
 st.markdown(f"### Show this sign: '{target_label}'")
 
 frame_placeholder = st.empty()
 label_placeholder = st.empty()
-feedback_placeholder = st.empty()  # NEW
+feedback_placeholder = st.empty()
 label = ""
-capture = cv2.VideoCapture(0)
 
+# -------------------- CAMERA STATE (NEW) --------------------
+if "capture" not in st.session_state:
+    st.session_state.capture = None
+
+# -------------------- SESSION STATE --------------------
 if 'on' not in st.session_state:
     st.session_state.on = False
     button = st.button('Begin Session')
@@ -56,17 +66,38 @@ else:
 
 if button:
     st.session_state.on = not st.session_state.on
-    if not st.session_state.on:
-        capture.release()
+
+    # -------------------- START SESSION (NEW) --------------------
+    if st.session_state.on:
+        if st.session_state.capture is None:
+            st.session_state.capture = cv2.VideoCapture(0)
+
+    # -------------------- END SESSION --------------------
+    else:
+        if st.session_state.capture is not None:
+            st.session_state.capture.release()
+            st.session_state.capture = None
         warning = st.warning("Session ended.")
-        time.sleep(2.5)
+        time.sleep(1.5)
         warning.empty()
+
     st.rerun()
 
+# -------------------- MAIN LOOP --------------------
 while st.session_state.on:
+
+    # -------------------- LOAD MODEL (LAZY) --------------------
+    if model is None:
+        model, detector, device, labels, offset = load_resources()
+
+    capture = st.session_state.capture
+
     success, img = capture.read()
     if not success:
         break
+
+    # -------------------- RESIZE EARLY (NEW) --------------------
+    img = cv2.resize(img, (640, 480))
 
     imgOutput = img.copy()
     imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -94,9 +125,6 @@ while st.session_state.on:
         x_min, x_max = int(min(x_list)), int(max(x_list))
         y_min, y_max = int(min(y_list)), int(max(y_list))
 
-        w = x_max - x_min
-        h = y_max - y_min
-
         x1 = max(x_min - offset, 0)
         y1 = max(y_min - offset, 0)
         x2 = min(x_max + offset, w_img)
@@ -120,11 +148,11 @@ while st.session_state.on:
             # ------------------ PREDICTION ------------------
             with torch.no_grad():
                 output = model(imgInput)
-                probs = torch.softmax(output, dim=1)  # NEW
+                probs = torch.softmax(output, dim=1)
                 index = torch.argmax(output, dim=1).item()
 
             label = labels[index]
-            confidence = probs[0][index].item()  # NEW
+            confidence = probs[0][index].item()
 
             # ------------------ FEEDBACK LOGIC ------------------
             feedback = ""
@@ -257,17 +285,23 @@ while st.session_state.on:
 
                 except:
                     pass
-            # ------------------ DISPLAY ------------------
+
             cv2.rectangle(imgOutput, (x1, y1 - 50), (x1 + 150, y1), (255, 0, 255), cv2.FILLED)
             cv2.putText(imgOutput, label, (x1 + 10, y1 - 15),
                         cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
 
             cv2.rectangle(imgOutput, (x1, y1), (x2, y2), (255, 0, 255), 4)
 
-            feedback_placeholder.markdown(f"### Feedback: {feedback}")  # NEW
+            feedback_placeholder.markdown(f"### Feedback: {feedback}")
 
     frame_placeholder.image(imgOutput, channels="BGR", width=640)
+
     if label:
         label_placeholder.markdown(f"## Detected Sign: '{label}'")
 
-capture.release()
+    # Loop 'throttle'
+    time.sleep(0.03)
+
+# -------------------- CLEANUP --------------------
+if st.session_state.capture is not None:
+    st.session_state.capture.release()
