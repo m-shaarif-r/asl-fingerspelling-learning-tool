@@ -67,7 +67,7 @@ else:
 if button:
     st.session_state.on = not st.session_state.on
 
-    # -------------------- START SESSION (NEW) --------------------
+    # -------------------- START SESSION --------------------
     if st.session_state.on:
         if st.session_state.capture is None:
             st.session_state.capture = cv2.VideoCapture(0)
@@ -96,7 +96,7 @@ while st.session_state.on:
     if not success:
         break
 
-    # -------------------- RESIZE EARLY (NEW) --------------------
+    # -------------------- RESIZE EARLY --------------------
     img = cv2.resize(img, (640, 480))
 
     imgOutput = img.copy()
