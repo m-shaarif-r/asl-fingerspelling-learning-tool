@@ -132,48 +132,131 @@ while st.session_state.on:
             # Basic correctness + confidence
             if label == target_label:
                 if confidence > 0.8:
-                    feedback = "Correct! Good 'A' sign."
+                    feedback = f"Correct! Good '{target_label}' sign."
                 else:
-                    feedback = "Looks like 'A', but refine your hand shape."
+                    feedback = f"Looks like '{target_label}', but refine your hand shape."
             else:
                 if confidence > 0.8:
-                    feedback = f"That looks like '{label}', not 'A'."
+                    feedback = f"That looks like '{label}', not '{target_label}'."
                 else:
                     feedback = "Unclear sign — try again."
 
             # ------------------ GEOMETRIC CHECK (A-specific) ------------------
-            # A = fingers folded, thumb tucked
-            try:
-                # Finger tips vs bases (y-axis check)
-                folded_fingers = 0
-                finger_tips = [8, 12, 16, 20]
-                finger_bases = [5, 9, 13, 17]
+            if target_label == "A":
+                # A = fingers folded, thumb tucked
+                try:
+                    # Finger tips vs bases (y-axis check)
+                    folded_fingers = 0
+                    finger_tips = [8, 12, 16, 20]
+                    finger_bases = [5, 9, 13, 17]
 
-                for tip, base in zip(finger_tips, finger_bases):
-                    if landmarks[tip].y > landmarks[base].y:
-                        folded_fingers += 1
+                    for tip, base in zip(finger_tips, finger_bases):
+                        if landmarks[tip].y > landmarks[base].y:
+                            folded_fingers += 1
 
-                thumb_tip = landmarks[4]
-                thumb_ip = landmarks[3]
+                    thumb_tip = landmarks[4]
+                    thumb_ip = landmarks[3]
 
-                thumb_tucked = thumb_tip.x < thumb_ip.x  # simple heuristic
+                    thumb_tucked = thumb_tip.x < thumb_ip.x  # simple heuristic
 
-                if label == target_label:
-                    if folded_fingers < 4:
-                        feedback += " | Fold your fingers more."
-                    if not thumb_tucked:
-                        feedback += " | Tuck your thumb in."
+                    if label == target_label:
+                        if folded_fingers < 4:
+                            feedback += " | Fold your fingers more."
+                        if not thumb_tucked:
+                            feedback += " | Tuck your thumb in."
 
-            except:
-                pass
+                except:
+                    pass
             # ------------------ GEOMETRIC CHECK (B-specific) ------------------
+            if target_label == "B":
+                try:
+                    finger_tips = [8, 12, 16, 20]
+                    finger_bases = [5, 9, 13, 17]
 
+                    extended_fingers = 0
+                    for tip, base in zip(finger_tips, finger_bases):
+                        if landmarks[tip].y < landmarks[base].y:
+                            extended_fingers += 1
+
+                    thumb_tip = landmarks[4]
+                    palm_center = landmarks[0]
+
+                    thumb_across = abs(thumb_tip.x - palm_center.x) < 0.1
+
+                    if label == target_label:
+                        if extended_fingers < 4:
+                            feedback += " | Extend all fingers fully."
+                        if not thumb_across:
+                            feedback += " | Place your thumb across your palm."
+
+                except:
+                    pass
             # ------------------ GEOMETRIC CHECK (C-specific) ------------------
+            if target_label == "C":
+                try:
+                    # Check curvature via distance between tip and base
+                    curved_fingers = 0
+                    finger_pairs = [(8,5), (12,9), (16,13), (20,17)]
 
+                    for tip, base in finger_pairs:
+                        dist = abs(landmarks[tip].y - landmarks[base].y)
+                        if 0.05 < dist < 0.25:
+                            curved_fingers += 1
+
+                    if label == target_label:
+                        if curved_fingers < 3:
+                            feedback += " | Curve your fingers to form a 'C' shape."
+                        else:
+                            feedback += " | Good curvature."
+
+                except:
+                    pass
             # ------------------ GEOMETRIC CHECK (L-specific) ------------------
+            if target_label == "L":
+                try:
+                    # Index extended
+                    index_extended = landmarks[8].y < landmarks[5].y
 
+                    # Other fingers folded
+                    folded_count = 0
+                    for tip, base in zip([12,16,20], [9,13,17]):
+                        if landmarks[tip].y > landmarks[base].y:
+                            folded_count += 1
+
+                    # Thumb extended sideways
+                    thumb_extended = abs(landmarks[4].x - landmarks[2].x) > 0.1
+
+                    if label == target_label:
+                        if not index_extended:
+                            feedback += " | Raise your index finger."
+                        if folded_count < 3:
+                            feedback += " | Fold the other fingers."
+                        if not thumb_extended:
+                            feedback += " | Extend your thumb outward."
+
+                except:
+                    pass
             # ------------------ GEOMETRIC CHECK (W-specific) ------------------
+            if target_label == "W":
+                try:
+                    # Count extended fingers
+                    finger_tips = [8, 12, 16, 20]
+                    finger_bases = [5, 9, 13, 17]
 
+                    extended = []
+                    for tip, base in zip(finger_tips, finger_bases):
+                        extended.append(landmarks[tip].y < landmarks[base].y)
+
+                    extended_count = sum(extended)
+
+                    if label == target_label:
+                        if extended_count != 3:
+                            feedback += " | Show exactly three fingers."
+                        else:
+                            feedback += " | Good finger count."
+
+                except:
+                    pass
             # ------------------ DISPLAY ------------------
             cv2.rectangle(imgOutput, (x1, y1 - 50), (x1 + 150, y1), (255, 0, 255), cv2.FILLED)
             cv2.putText(imgOutput, label, (x1 + 10, y1 - 15),
