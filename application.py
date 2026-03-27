@@ -7,12 +7,36 @@ import time
 from inference_post_training import model, detector, device, labels, offset
 
 # --------------------UI Setup--------------------
-st.set_page_config(page_title = "ASL Learning Tool")
-st.title("ASL Learning Tool")
+st.set_page_config(page_title = "ASL (Sign language) Learning Tool")
+st.title("ASL (Sign Language) Learning Tool")
 st.write("Obtain real-time feedback by practicing your ASL skills!")
 
-# -------------------- NEW: TARGET SIGN --------------------
-target_label = "A"
+# -------------------- TARGET SIGN SELECTION --------------------
+if "target_label" not in st.session_state:
+    st.session_state.target_label = "A"
+
+st.markdown("### Choose a sign to practice:")
+
+col1, col2, col3, col4, col5 = st.columns(5)
+
+with col1:
+    if st.button("A"):
+        st.session_state.target_label = "A"
+with col2:
+    if st.button("B"):
+        st.session_state.target_label = "B"
+with col3:
+    if st.button("C"):
+        st.session_state.target_label = "C"
+with col4:
+    if st.button("L"):
+        st.session_state.target_label = "L"
+with col5:
+    if st.button("W"):
+        st.session_state.target_label = "W"
+
+target_label = st.session_state.target_label
+
 st.markdown(f"### Show this sign: '{target_label}'")
 
 frame_placeholder = st.empty()
@@ -142,6 +166,13 @@ while st.session_state.on:
 
             except:
                 pass
+            # ------------------ GEOMETRIC CHECK (B-specific) ------------------
+
+            # ------------------ GEOMETRIC CHECK (C-specific) ------------------
+
+            # ------------------ GEOMETRIC CHECK (L-specific) ------------------
+
+            # ------------------ GEOMETRIC CHECK (W-specific) ------------------
 
             # ------------------ DISPLAY ------------------
             cv2.rectangle(imgOutput, (x1, y1 - 50), (x1 + 150, y1), (255, 0, 255), cv2.FILLED)
