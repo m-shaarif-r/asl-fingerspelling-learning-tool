@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import mediapipe as mp
 import time
-# For Streamlit use, as a separate file from the inference_post_training.py file.
 from inference_post_training import model, detector, device, labels, offset
 
 # --------------------UI Setup--------------------
@@ -12,24 +11,25 @@ st.set_page_config(page_title = "ASL Learning Tool")
 st.title("ASL Learning Tool")
 st.write("Obtain real-time feedback by practicing your ASL skills!")
 
+# -------------------- NEW: TARGET SIGN --------------------
+target_label = "A"
+st.markdown(f"### Show this sign: '{target_label}'")
+
 frame_placeholder = st.empty()
 label_placeholder = st.empty()
+feedback_placeholder = st.empty()  # NEW
 label = ""
 capture = cv2.VideoCapture(0)
 
-# Saving the previous state (started or ended the session)
-# This is the initial run: because "on" variable does not exist in the session_state at the beginning.
 if 'on' not in st.session_state:
     st.session_state.on = False
     button = st.button('Begin Session')
 else:
-    # Flips the button accordingly!
     if st.session_state.on:
         button = st.button('End Session')
     else:
         button = st.button('Begin Session')
 
-# If the button is pressed, flips the "on" status. Displays that the session has ended (if it was in progress).
 if button:
     st.session_state.on = not st.session_state.on
     if not st.session_state.on:
@@ -39,14 +39,12 @@ if button:
         warning.empty()
     st.rerun()
 
-# While the session is in progress:
 while st.session_state.on:
     success, img = capture.read()
     if not success:
         break
 
     imgOutput = img.copy()
-    # Convert to RGB
     imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     mp_image = mp.Image(
@@ -61,13 +59,11 @@ while st.session_state.on:
 
         h_img, w_img, _ = img.shape
 
-        # Draw a small green dot for each landmark on the output image
         for lm in landmarks:
             x_lm = int(lm.x * w_img)
             y_lm = int(lm.y * h_img)
             cv2.circle(imgOutput, (x_lm, y_lm), 4, (0, 255, 0), cv2.FILLED)
 
-        # ------------------ BOUNDING BOX ------------------
         x_list = [lm.x * w_img for lm in landmarks]
         y_list = [lm.y * h_img for lm in landmarks]
 
@@ -77,7 +73,6 @@ while st.session_state.on:
         w = x_max - x_min
         h = y_max - y_min
 
-        # ------------------ CROP ------------------
         x1 = max(x_min - offset, 0)
         y1 = max(y_min - offset, 0)
         x2 = min(x_max + offset, w_img)
@@ -87,33 +82,66 @@ while st.session_state.on:
 
         if imgCrop.size != 0:
 
-            # ------------------ PREPROCESS (match training transforms) ------------------
-            # Resize to match training input
             imgInput = cv2.resize(imgCrop, (224, 224))
-
-            # Convert BGR (OpenCV) -> RGB
             imgInput = cv2.cvtColor(imgInput, cv2.COLOR_BGR2RGB)
-
-            # Scale to [0,1]
             imgInput = imgInput.astype(np.float32) / 255.0
 
-            # Normalize using training mean/std
             mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
             std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
             imgInput = (imgInput - mean[None, None, :]) / std[None, None, :]
 
-            # HWC -> CHW
             imgInput = np.transpose(imgInput, (2, 0, 1))
-
-            # Add batch dimension and move to device
             imgInput = torch.from_numpy(imgInput).unsqueeze(0).to(device)
 
             # ------------------ PREDICTION ------------------
             with torch.no_grad():
                 output = model(imgInput)
+                probs = torch.softmax(output, dim=1)  # NEW
                 index = torch.argmax(output, dim=1).item()
 
             label = labels[index]
+            confidence = probs[0][index].item()  # NEW
+
+            # ------------------ FEEDBACK LOGIC ------------------
+            feedback = ""
+
+            # Basic correctness + confidence
+            if label == target_label:
+                if confidence > 0.8:
+                    feedback = "Correct! Good 'A' sign."
+                else:
+                    feedback = "Looks like 'A', but refine your hand shape."
+            else:
+                if confidence > 0.8:
+                    feedback = f"That looks like '{label}', not 'A'."
+                else:
+                    feedback = "Unclear sign — try again."
+
+            # ------------------ GEOMETRIC CHECK (A-specific) ------------------
+            # A = fingers folded, thumb tucked
+            try:
+                # Finger tips vs bases (y-axis check)
+                folded_fingers = 0
+                finger_tips = [8, 12, 16, 20]
+                finger_bases = [5, 9, 13, 17]
+
+                for tip, base in zip(finger_tips, finger_bases):
+                    if landmarks[tip].y > landmarks[base].y:
+                        folded_fingers += 1
+
+                thumb_tip = landmarks[4]
+                thumb_ip = landmarks[3]
+
+                thumb_tucked = thumb_tip.x < thumb_ip.x  # simple heuristic
+
+                if label == target_label:
+                    if folded_fingers < 4:
+                        feedback += " | Fold your fingers more."
+                    if not thumb_tucked:
+                        feedback += " | Tuck your thumb in."
+
+            except:
+                pass
 
             # ------------------ DISPLAY ------------------
             cv2.rectangle(imgOutput, (x1, y1 - 50), (x1 + 150, y1), (255, 0, 255), cv2.FILLED)
@@ -122,8 +150,10 @@ while st.session_state.on:
 
             cv2.rectangle(imgOutput, (x1, y1), (x2, y2), (255, 0, 255), 4)
 
+            feedback_placeholder.markdown(f"### Feedback: {feedback}")  # NEW
+
     frame_placeholder.image(imgOutput, channels="BGR", width=640)
     if label:
-        label_placeholder.markdown(f"## Detected Sign: '{label}'")        
+        label_placeholder.markdown(f"## Detected Sign: '{label}'")
 
 capture.release()
