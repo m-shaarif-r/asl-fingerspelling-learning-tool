@@ -1,22 +1,33 @@
-import streamlit as st
-import cv2
-import numpy as np
-import torch
-import mediapipe as mp
-import time
+import threading
 
-# -------------------- LAZY LOAD (NEW) --------------------
+import av
+import cv2
+import mediapipe as mp
+import numpy as np
+import streamlit as st
+import torch
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
+
+# -------------------- LAZY LOAD MODEL + DETECTOR --------------------
 @st.cache_resource
 def load_resources():
-    from inference_post_training import model, detector, device, labels, offset
+    from inference_post_training import detector, device, labels, model, offset
     return model, detector, device, labels, offset
 
-model = detector = device = labels = offset = None
 
-# --------------------UI Setup--------------------
-st.set_page_config(page_title = "ASL (Sign language) Learning Tool")
+# -------------------- UI SETUP --------------------
+st.set_page_config(page_title="ASL (Sign Language) Learning Tool")
 st.title("ASL (Sign Language) Learning Tool")
-st.write("Obtain real-time feedback by practicing your ASL skills!")
+st.write("Obtain real-time feedback by practicing your ASL skills, right in your browser!")
+
+with st.expander("How this works", expanded=False):
+    st.write(
+        "Your webcam video is processed to run the model but is not stored. "
+        "Each frame is passed through a MediaPipe hand landmarker to find your "
+        "hand, then a small PyTorch CNN classifies the letter you're signing. "
+        "Simple geometric checks on the hand landmarks add specific coaching "
+        "tips (e.g. 'tuck your thumb in')."
+    )
 
 # -------------------- TARGET SIGN SELECTION --------------------
 if "target_label" not in st.session_state:
@@ -24,284 +35,215 @@ if "target_label" not in st.session_state:
 
 st.markdown("### Choose a sign to practice:")
 
-col1, col2, col3, col4, col5 = st.columns(5)
-
-with col1:
-    if st.button("A"):
-        st.session_state.target_label = "A"
-with col2:
-    if st.button("B"):
-        st.session_state.target_label = "B"
-with col3:
-    if st.button("C"):
-        st.session_state.target_label = "C"
-with col4:
-    if st.button("L"):
-        st.session_state.target_label = "L"
-with col5:
-    if st.button("W"):
-        st.session_state.target_label = "W"
+cols = st.columns(5)
+for col, letter in zip(cols, ["A", "B", "C", "L", "W"]):
+    with col:
+        if st.button(letter, use_container_width=True):
+            st.session_state.target_label = letter
 
 target_label = st.session_state.target_label
 st.markdown(f"### Show this sign: '{target_label}'")
 
-frame_placeholder = st.empty()
-label_placeholder = st.empty()
-feedback_placeholder = st.empty()
-label = ""
 
-# -------------------- CAMERA STATE (NEW) --------------------
-if "capture" not in st.session_state:
-    st.session_state.capture = None
+# -------------------- SHARED STATE BETWEEN WEBRTC THREAD AND UI THREAD --------------------
+class SharedState:
+    """The webrtc video callback runs on its own thread, so results are handed
+    back to the main Streamlit thread through this small thread-safe box."""
 
-# -------------------- SESSION STATE --------------------
-if 'on' not in st.session_state:
-    st.session_state.on = False
-    button = st.button('Begin Session')
-else:
-    if st.session_state.on:
-        button = st.button('End Session')
-    else:
-        button = st.button('Begin Session')
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.label = ""
+        self.feedback = ""
 
-if button:
-    st.session_state.on = not st.session_state.on
 
-    # -------------------- START SESSION --------------------
-    if st.session_state.on:
-        if st.session_state.capture is None:
-            st.session_state.capture = cv2.VideoCapture(0)
+if "shared_state" not in st.session_state:
+    st.session_state.shared_state = SharedState()
 
-    # -------------------- END SESSION --------------------
-    else:
-        if st.session_state.capture is not None:
-            st.session_state.capture.release()
-            st.session_state.capture = None
-        warning = st.warning("Session ended.")
-        time.sleep(1.5)
-        warning.empty()
+shared_state = st.session_state.shared_state
 
-    st.rerun()
 
-# -------------------- MAIN LOOP --------------------
-while st.session_state.on:
+def run_geometric_checks(target_label, label, landmarks, feedback):
+    """Adds sign-specific coaching tips on top of the base model prediction.
+    These are simple heuristics on MediaPipe's 21 hand landmarks, not part of
+    the trained model itself."""
 
-    # -------------------- LOAD MODEL (LAZY) --------------------
-    if model is None:
-        model, detector, device, labels, offset = load_resources()
+    if target_label == "A":
+        try:
+            finger_tips, finger_bases = [8, 12, 16, 20], [5, 9, 13, 17]
+            folded_fingers = sum(
+                1 for tip, base in zip(finger_tips, finger_bases) if landmarks[tip].y > landmarks[base].y
+            )
+            thumb_tucked = landmarks[4].x < landmarks[3].x
+            if label == target_label:
+                if folded_fingers < 4:
+                    feedback += " | Fold your fingers more."
+                if not thumb_tucked:
+                    feedback += " | Tuck your thumb in."
+        except Exception:
+            pass
 
-    capture = st.session_state.capture
+    elif target_label == "B":
+        try:
+            finger_tips, finger_bases = [8, 12, 16, 20], [5, 9, 13, 17]
+            extended_fingers = sum(
+                1 for tip, base in zip(finger_tips, finger_bases) if landmarks[tip].y < landmarks[base].y
+            )
+            thumb_across = abs(landmarks[4].x - landmarks[0].x) < 0.1
+            if label == target_label:
+                if extended_fingers < 4:
+                    feedback += " | Extend all fingers fully."
+                if not thumb_across:
+                    feedback += " | Place your thumb across your palm."
+        except Exception:
+            pass
 
-    success, img = capture.read()
-    if not success:
-        break
+    elif target_label == "C":
+        try:
+            finger_pairs = [(8, 5), (12, 9), (16, 13), (20, 17)]
+            curved_fingers = sum(1 for tip, base in finger_pairs if 0.05 < abs(landmarks[tip].y - landmarks[base].y) < 0.25)
+            if label == target_label:
+                if curved_fingers < 3:
+                    feedback += " | Curve your fingers to form a 'C' shape."
+                else:
+                    feedback += " | Good curvature."
+        except Exception:
+            pass
 
-    # -------------------- RESIZE EARLY --------------------
+    elif target_label == "L":
+        try:
+            index_extended = landmarks[8].y < landmarks[5].y
+            folded_count = sum(1 for tip, base in zip([12, 16, 20], [9, 13, 17]) if landmarks[tip].y > landmarks[base].y)
+            thumb_extended = abs(landmarks[4].x - landmarks[2].x) > 0.1
+            if label == target_label:
+                if not index_extended:
+                    feedback += " | Raise your index finger."
+                if folded_count < 3:
+                    feedback += " | Fold the other fingers."
+                if not thumb_extended:
+                    feedback += " | Extend your thumb outward."
+        except Exception:
+            pass
+
+    elif target_label == "W":
+        try:
+            finger_tips, finger_bases = [8, 12, 16, 20], [5, 9, 13, 17]
+            extended_count = sum(1 for tip, base in zip(finger_tips, finger_bases) if landmarks[tip].y < landmarks[base].y)
+            if label == target_label:
+                if extended_count != 3:
+                    feedback += " | Show exactly three fingers."
+                else:
+                    feedback += " | Good finger count."
+        except Exception:
+            pass
+
+    return feedback
+
+
+def process_frame(frame: av.VideoFrame) -> av.VideoFrame:
+    model, detector, device, labels, offset = load_resources()
+
+    img = frame.to_ndarray(format="bgr24")
     img = cv2.resize(img, (640, 480))
+    img_output = img.copy()
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    imgOutput = img.copy()
-    imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-    mp_image = mp.Image(
-        image_format=mp.ImageFormat.SRGB,
-        data=imgRGB
-    )
-
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
     result = detector.detect(mp_image)
+
+    label = ""
+    feedback = ""
 
     if result.hand_landmarks:
         landmarks = result.hand_landmarks[0]
-
         h_img, w_img, _ = img.shape
 
         for lm in landmarks:
-            x_lm = int(lm.x * w_img)
-            y_lm = int(lm.y * h_img)
-            cv2.circle(imgOutput, (x_lm, y_lm), 4, (0, 255, 0), cv2.FILLED)
+            cv2.circle(img_output, (int(lm.x * w_img), int(lm.y * h_img)), 4, (0, 255, 0), cv2.FILLED)
 
         x_list = [lm.x * w_img for lm in landmarks]
         y_list = [lm.y * h_img for lm in landmarks]
-
         x_min, x_max = int(min(x_list)), int(max(x_list))
         y_min, y_max = int(min(y_list)), int(max(y_list))
 
-        x1 = max(x_min - offset, 0)
-        y1 = max(y_min - offset, 0)
-        x2 = min(x_max + offset, w_img)
-        y2 = min(y_max + offset, h_img)
+        x1, y1 = max(x_min - offset, 0), max(y_min - offset, 0)
+        x2, y2 = min(x_max + offset, w_img), min(y_max + offset, h_img)
 
-        imgCrop = img[y1:y2, x1:x2]
+        img_crop = img[y1:y2, x1:x2]
 
-        if imgCrop.size != 0:
-
-            imgInput = cv2.resize(imgCrop, (224, 224))
-            imgInput = cv2.cvtColor(imgInput, cv2.COLOR_BGR2RGB)
-            imgInput = imgInput.astype(np.float32) / 255.0
+        if img_crop.size != 0:
+            img_input = cv2.resize(img_crop, (224, 224))
+            img_input = cv2.cvtColor(img_input, cv2.COLOR_BGR2RGB)
+            img_input = img_input.astype(np.float32) / 255.0
 
             mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
             std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-            imgInput = (imgInput - mean[None, None, :]) / std[None, None, :]
+            img_input = (img_input - mean[None, None, :]) / std[None, None, :]
 
-            imgInput = np.transpose(imgInput, (2, 0, 1))
-            imgInput = torch.from_numpy(imgInput).unsqueeze(0).to(device)
+            img_input = np.transpose(img_input, (2, 0, 1))
+            img_input = torch.from_numpy(img_input).unsqueeze(0).to(device)
 
-            # ------------------ PREDICTION ------------------
             with torch.no_grad():
-                output = model(imgInput)
+                output = model(img_input)
                 probs = torch.softmax(output, dim=1)
                 index = torch.argmax(output, dim=1).item()
 
             label = labels[index]
             confidence = probs[0][index].item()
 
-            # ------------------ FEEDBACK LOGIC ------------------
-            feedback = ""
+            current_target = st.session_state.get("target_label", "A")
 
-            # Basic correctness + confidence
-            if label == target_label:
-                if confidence > 0.8:
-                    feedback = f"Correct! Good '{target_label}' sign."
-                else:
-                    feedback = f"Looks like '{target_label}', but refine your hand shape."
+            if label == current_target:
+                feedback = (
+                    f"Correct! Good '{current_target}' sign."
+                    if confidence > 0.8
+                    else f"Looks like '{current_target}', but refine your hand shape."
+                )
             else:
-                if confidence > 0.8:
-                    feedback = f"That looks like '{label}', not '{target_label}'."
-                else:
-                    feedback = "Unclear sign — try again."
+                feedback = (
+                    f"That looks like '{label}', not '{current_target}'."
+                    if confidence > 0.8
+                    else "Unclear sign — try again."
+                )
 
-            # ------------------ GEOMETRIC CHECK (A-specific) ------------------
-            if target_label == "A":
-                # A = fingers folded, thumb tucked
-                try:
-                    # Finger tips vs bases (y-axis check)
-                    folded_fingers = 0
-                    finger_tips = [8, 12, 16, 20]
-                    finger_bases = [5, 9, 13, 17]
+            feedback = run_geometric_checks(current_target, label, landmarks, feedback)
 
-                    for tip, base in zip(finger_tips, finger_bases):
-                        if landmarks[tip].y > landmarks[base].y:
-                            folded_fingers += 1
+            cv2.rectangle(img_output, (x1, y1 - 50), (x1 + 150, y1), (255, 0, 255), cv2.FILLED)
+            cv2.putText(img_output, label, (x1 + 10, y1 - 15), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
+            cv2.rectangle(img_output, (x1, y1), (x2, y2), (255, 0, 255), 4)
 
-                    thumb_tip = landmarks[4]
-                    thumb_ip = landmarks[3]
+    with shared_state.lock:
+        shared_state.label = label
+        shared_state.feedback = feedback
 
-                    thumb_tucked = thumb_tip.x < thumb_ip.x  # simple heuristic
+    return av.VideoFrame.from_ndarray(img_output, format="bgr24")
 
-                    if label == target_label:
-                        if folded_fingers < 4:
-                            feedback += " | Fold your fingers more."
-                        if not thumb_tucked:
-                            feedback += " | Tuck your thumb in."
 
-                except:
-                    pass
-            # ------------------ GEOMETRIC CHECK (B-specific) ------------------
-            if target_label == "B":
-                try:
-                    finger_tips = [8, 12, 16, 20]
-                    finger_bases = [5, 9, 13, 17]
+def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
+    return process_frame(frame)
 
-                    extended_fingers = 0
-                    for tip, base in zip(finger_tips, finger_bases):
-                        if landmarks[tip].y < landmarks[base].y:
-                            extended_fingers += 1
 
-                    thumb_tip = landmarks[4]
-                    palm_center = landmarks[0]
+# -------------------- WEBCAM STREAM (RUNS IN THE VISITOR'S BROWSER) --------------------
+RTC_CONFIGURATION = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 
-                    thumb_across = abs(thumb_tip.x - palm_center.x) < 0.1
+ctx = webrtc_streamer(
+    key="asl-learning-tool",
+    mode=WebRtcMode.SENDRECV,
+    rtc_configuration=RTC_CONFIGURATION,
+    video_frame_callback=video_frame_callback,
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+)
 
-                    if label == target_label:
-                        if extended_fingers < 4:
-                            feedback += " | Extend all fingers fully."
-                        if not thumb_across:
-                            feedback += " | Place your thumb across your palm."
+label_placeholder = st.empty()
+feedback_placeholder = st.empty()
 
-                except:
-                    pass
-            # ------------------ GEOMETRIC CHECK (C-specific) ------------------
-            if target_label == "C":
-                try:
-                    # Check curvature via distance between tip and base
-                    curved_fingers = 0
-                    finger_pairs = [(8,5), (12,9), (16,13), (20,17)]
-
-                    for tip, base in finger_pairs:
-                        dist = abs(landmarks[tip].y - landmarks[base].y)
-                        if 0.05 < dist < 0.25:
-                            curved_fingers += 1
-
-                    if label == target_label:
-                        if curved_fingers < 3:
-                            feedback += " | Curve your fingers to form a 'C' shape."
-                        else:
-                            feedback += " | Good curvature."
-
-                except:
-                    pass
-            # ------------------ GEOMETRIC CHECK (L-specific) ------------------
-            if target_label == "L":
-                try:
-                    # Index extended
-                    index_extended = landmarks[8].y < landmarks[5].y
-
-                    # Other fingers folded
-                    folded_count = 0
-                    for tip, base in zip([12,16,20], [9,13,17]):
-                        if landmarks[tip].y > landmarks[base].y:
-                            folded_count += 1
-
-                    # Thumb extended sideways
-                    thumb_extended = abs(landmarks[4].x - landmarks[2].x) > 0.1
-
-                    if label == target_label:
-                        if not index_extended:
-                            feedback += " | Raise your index finger."
-                        if folded_count < 3:
-                            feedback += " | Fold the other fingers."
-                        if not thumb_extended:
-                            feedback += " | Extend your thumb outward."
-
-                except:
-                    pass
-            # ------------------ GEOMETRIC CHECK (W-specific) ------------------
-            if target_label == "W":
-                try:
-                    # Count extended fingers
-                    finger_tips = [8, 12, 16, 20]
-                    finger_bases = [5, 9, 13, 17]
-
-                    extended = []
-                    for tip, base in zip(finger_tips, finger_bases):
-                        extended.append(landmarks[tip].y < landmarks[base].y)
-
-                    extended_count = sum(extended)
-
-                    if label == target_label:
-                        if extended_count != 3:
-                            feedback += " | Show exactly three fingers."
-                        else:
-                            feedback += " | Good finger count."
-
-                except:
-                    pass
-
-            cv2.rectangle(imgOutput, (x1, y1 - 50), (x1 + 150, y1), (255, 0, 255), cv2.FILLED)
-            cv2.putText(imgOutput, label, (x1 + 10, y1 - 15),
-                        cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
-
-            cv2.rectangle(imgOutput, (x1, y1), (x2, y2), (255, 0, 255), 4)
-
-            feedback_placeholder.markdown(f"### Feedback: {feedback}")
-
-    frame_placeholder.image(imgOutput, channels="BGR", width=640)
-
-    if label:
-        label_placeholder.markdown(f"## Detected Sign: '{label}'")
-
-    # Loop 'throttle'
-    time.sleep(0.03)
-
-# -------------------- CLEANUP --------------------
-if st.session_state.capture is not None:
-    st.session_state.capture.release()
+if ctx.state.playing:
+    with shared_state.lock:
+        current_label = shared_state.label
+        current_feedback = shared_state.feedback
+    if current_label:
+        label_placeholder.markdown(f"## Detected Sign: '{current_label}'")
+    if current_feedback:
+        feedback_placeholder.markdown(f"### Feedback: {current_feedback}")
+else:
+    st.info("Click **Start** above and allow camera access to begin practicing.")
