@@ -42,8 +42,7 @@ Webcam frame → MediaPipe hand landmarks → crop + normalize → ResNet-18 →
 ├── Model/pytorch_model.pth         # Trained model checkpoint
 ├── hand_landmarker.task            # MediaPipe hand landmark model
 ├── requirements.txt                # Python dependencies
-├── packages.txt                    # System (apt) dependencies for deployment
-└── runtime.txt                     # Pinned Python version for deployment
+└── packages.txt                    # System (apt) dependencies for deployment
 ```
 
 ## Currently supported letters
@@ -84,8 +83,9 @@ This app is designed to deploy for free on [Streamlit Community Cloud](https://s
 1. Push this repo to GitHub (make sure `Model/pytorch_model.pth` and `hand_landmarker.task` are committed — they're the app's only large binary assets).
 2. Go to [share.streamlit.io](https://share.streamlit.io), sign in, and click **New app**.
 3. Point it at this repo, branch, and set the main file path to `application.py`.
-4. Deploy. Streamlit Cloud will automatically pick up `requirements.txt`, `packages.txt`, and `runtime.txt`.
-5. Once live, visitors just click the link and allow camera access — no install required. Update the demo link at the top of this README once you have it.
+4. **Before clicking Deploy**, open **Advanced settings** and explicitly select **Python 3.11** (or 3.10) from the Python version dropdown. This matters: `mediapipe` does not publish wheels for Python 3.13/3.14, and Community Cloud has been defaulting new apps to newer Python versions that break this dependency. Community Cloud only lets you set this at initial deploy time — changing it later means deleting and redeploying the app.
+5. Deploy. Streamlit Cloud will pick up `requirements.txt` and `packages.txt` automatically.
+6. Once live, visitors just click the link and allow camera access — no install required. Update the demo link at the top of this README once you have it.
 
 > Because the app uses `streamlit-webrtc`, the webcam feed is captured in the *visitor's* browser and streamed to the app for inference — it does not try to open a camera device on the server (which wouldn't exist on a hosted platform).
 
