@@ -236,7 +236,30 @@ def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
 
 
 # -------------------- WEBCAM STREAM (RUNS IN THE VISITOR'S BROWSER) --------------------
-RTC_CONFIGURATION = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_ice_servers():
+    """STUN alone can't connect through most cloud/NAT setups (e.g. Streamlit
+    Cloud), so a TURN relay is needed. Provide Metered credentials via
+    Streamlit secrets: METERED_APP_NAME and METERED_API_KEY."""
+    servers = [{"urls": ["stun:stun.l.google.com:19302"]}]
+    try:
+        import requests
+
+        app_name = st.secrets["METERED_APP_NAME"]
+        api_key = st.secrets["METERED_API_KEY"]
+        resp = requests.get(
+            f"https://{app_name}.metered.live/api/v1/turn/credentials",
+            params={"apiKey": api_key},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        servers = resp.json()
+    except Exception:
+        pass
+    return servers
+
+
+RTC_CONFIGURATION = {"iceServers": get_ice_servers()}
 
 ctx = webrtc_streamer(
     key="asl-learning-tool",
