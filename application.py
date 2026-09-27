@@ -253,7 +253,20 @@ def get_ice_servers():
             timeout=10,
         )
         resp.raise_for_status()
-        servers = resp.json()
+        all_servers = resp.json()
+
+        # aiortc (server side) handles plain UDP TURN best, and a long server
+        # list slows ICE gathering. Keep one STUN and one UDP TURN entry.
+        def first_url(entry):
+            urls = entry["urls"]
+            return urls if isinstance(urls, str) else urls[0]
+
+        stun = [s for s in all_servers if first_url(s).startswith("stun:")][:1]
+        turn = [
+            s for s in all_servers
+            if first_url(s).startswith("turn:") and "transport=tcp" not in first_url(s)
+        ][:1]
+        servers = (stun + turn) or all_servers
     except Exception:
         pass
     return servers
