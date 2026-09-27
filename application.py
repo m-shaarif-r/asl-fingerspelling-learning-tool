@@ -1,4 +1,5 @@
 import threading
+import time
 
 import av
 import cv2
@@ -54,12 +55,21 @@ class SharedState:
         self.lock = threading.Lock()
         self.label = ""
         self.feedback = ""
+        self.target_label = "A"
 
 
 if "shared_state" not in st.session_state:
     st.session_state.shared_state = SharedState()
 
 shared_state = st.session_state.shared_state
+with shared_state.lock:
+    shared_state.target_label = target_label
+
+# Load the model in the main thread BEFORE starting the stream, so the first
+# video frame isn't blocked by a slow model load (and no Streamlit calls are
+# needed from the WebRTC worker thread).
+with st.spinner("Loading model..."):
+    model, detector, device, labels, offset = load_resources()
 
 
 def run_geometric_checks(target_label, label, landmarks, feedback):
@@ -140,8 +150,6 @@ def run_geometric_checks(target_label, label, landmarks, feedback):
 
 
 def process_frame(frame: av.VideoFrame) -> av.VideoFrame:
-    model, detector, device, labels, offset = load_resources()
-
     img = frame.to_ndarray(format="bgr24")
     img = cv2.resize(img, (640, 480))
     img_output = img.copy()
@@ -190,7 +198,8 @@ def process_frame(frame: av.VideoFrame) -> av.VideoFrame:
             label = labels[index]
             confidence = probs[0][index].item()
 
-            current_target = st.session_state.get("target_label", "A")
+            with shared_state.lock:
+                current_target = shared_state.target_label
 
             if label == current_target:
                 feedback = (
@@ -219,7 +228,11 @@ def process_frame(frame: av.VideoFrame) -> av.VideoFrame:
 
 
 def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
-    return process_frame(frame)
+    try:
+        return process_frame(frame)
+    except Exception:
+        # Never let an error kill the stream; just show the raw frame.
+        return frame
 
 
 # -------------------- WEBCAM STREAM (RUNS IN THE VISITOR'S BROWSER) --------------------
@@ -238,12 +251,12 @@ label_placeholder = st.empty()
 feedback_placeholder = st.empty()
 
 if ctx.state.playing:
-    with shared_state.lock:
-        current_label = shared_state.label
-        current_feedback = shared_state.feedback
-    if current_label:
-        label_placeholder.markdown(f"## Detected Sign: '{current_label}'")
-    if current_feedback:
-        feedback_placeholder.markdown(f"### Feedback: {current_feedback}")
+    while ctx.state.playing:
+        with shared_state.lock:
+            current_label = shared_state.label
+            current_feedback = shared_state.feedback
+        label_placeholder.markdown(f"## Detected Sign: '{current_label}'" if current_label else "")
+        feedback_placeholder.markdown(f"### Feedback: {current_feedback}" if current_feedback else "")
+        time.sleep(0.2)
 else:
     st.info("Click **Start** above and allow camera access to begin practicing.")
