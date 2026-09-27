@@ -1,3 +1,5 @@
+import os
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -8,8 +10,11 @@ from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.core.base_options import BaseOptions
 
 # ------------------ CONFIG ------------------
-model_path = "hand_landmarker.task"
-pytorch_model_path = "Model/pytorch_model.pth"
+# Resolve paths relative to this file so the app works no matter what
+# directory it's launched from (e.g. Streamlit Cloud).
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+model_path = os.path.join(BASE_DIR, "hand_landmarker.task")
+pytorch_model_path = os.path.join(BASE_DIR, "Model", "pytorch_model.pth")
 
 offset = 20
 
@@ -22,7 +27,11 @@ labels = [
 # ------------------ LOAD MODEL ------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = torch.load(pytorch_model_path, map_location=device)
+# NOTE: model_training.py saves the full model object (torch.save(model, ...)),
+# not just a state_dict, so it must be loaded with weights_only=False.
+# This requires torch>=2.6's explicit opt-in for unpickling arbitrary objects,
+# and only works because we trust this checkpoint (we produced it ourselves).
+model = torch.load(pytorch_model_path, map_location=device, weights_only=False)
 model.to(device)
 model.eval()
 
