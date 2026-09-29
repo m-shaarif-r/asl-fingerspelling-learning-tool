@@ -294,7 +294,10 @@ _webrtc_kwargs = dict(
     mode=WebRtcMode.SENDRECV,
     rtc_configuration=RTC_CONFIGURATION,
     video_frame_callback=video_frame_callback,
-    media_stream_constraints={"video": True, "audio": False},
+    media_stream_constraints={
+        "video": {"width": {"ideal": 640}, "height": {"ideal": 480}, "frameRate": {"ideal": 15, "max": 15}},
+        "audio": False,
+    },
     async_processing=True,
 )
 if "server_rtc_configuration" in inspect.signature(webrtc_streamer).parameters:
