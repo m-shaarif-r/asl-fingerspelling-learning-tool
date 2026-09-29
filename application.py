@@ -1,3 +1,5 @@
+import inspect
+import logging
 import threading
 import time
 
@@ -263,11 +265,44 @@ def get_ice_servers():
         return fallback
 
 
-ice_servers = get_ice_servers()
-RTC_CONFIGURATION = {"iceServers": ice_servers}
-st.caption(f"ICE servers loaded: {len(ice_servers)}")  # temporary debug line
+# ---- TEMPORARY DEBUG: server-side WebRTC logging (visible in Manage app -> logs) ----
+_aioice_logger = logging.getLogger("aioice")
+if not _aioice_logger.handlers:
+    _aioice_logger.addHandler(logging.StreamHandler())
+_aioice_logger.setLevel(logging.DEBUG)
 
-ctx = webrtc_streamer(
+
+def _first_url(s):
+    u = s["urls"]
+    return u if isinstance(u, str) else u[0]
+
+
+all_ice_servers = get_ice_servers()
+stun_entries = [s for s in all_ice_servers if _first_url(s).startswith("stun:")][:1]
+turn_udp = [s for s in all_ice_servers
+            if _first_url(s).startswith("turn:") and "transport=tcp" not in _first_url(s)]
+turn_tcp = [s for s in all_ice_servers
+            if _first_url(s).startswith("turn:") and "transport=tcp" in _first_url(s)]
+turn_tls = [s for s in all_ice_servers if _first_url(s).startswith("turns:")]
+
+# TEMPORARY DEBUG: lets you test which TURN entry the SERVER uses without redeploying.
+server_mode = st.sidebar.radio(
+    "Server TURN mode (debug)",
+    ["UDP TURN", "TCP TURN", "TLS TURN (turns:)"],
+)
+chosen = {"UDP TURN": turn_udp, "TCP TURN": turn_tcp, "TLS TURN (turns:)": turn_tls}[server_mode][:1]
+server_ice_servers = stun_entries + chosen
+
+RTC_CONFIGURATION = {"iceServers": all_ice_servers}          # browser gets the full list
+SERVER_RTC_CONFIGURATION = {"iceServers": server_ice_servers}  # server gets stun + ONE turn
+
+st.caption(
+    f"Browser ICE servers: {len(all_ice_servers)} | "
+    f"Server ICE servers ({server_mode}): {[_first_url(s) for s in server_ice_servers]}"
+)
+
+
+_webrtc_kwargs = dict(
     key="asl-learning-tool",
     mode=WebRtcMode.SENDRECV,
     rtc_configuration=RTC_CONFIGURATION,
@@ -275,6 +310,12 @@ ctx = webrtc_streamer(
     media_stream_constraints={"video": True, "audio": False},
     async_processing=True,
 )
+if "server_rtc_configuration" in inspect.signature(webrtc_streamer).parameters:
+    _webrtc_kwargs["server_rtc_configuration"] = SERVER_RTC_CONFIGURATION
+else:
+    st.warning("This streamlit-webrtc version has no server_rtc_configuration; "
+               "the server will use the same list as the browser.")
+ctx = webrtc_streamer(**_webrtc_kwargs)
 
 label_placeholder = st.empty()
 feedback_placeholder = st.empty()
