@@ -1,3 +1,4 @@
+import inspect
 import logging
 import threading
 import time
@@ -9,6 +10,7 @@ import numpy as np
 import requests
 import streamlit as st
 import torch
+import streamlit_webrtc
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 # -------------------- LAZY LOAD MODEL + DETECTOR --------------------
@@ -284,21 +286,31 @@ turn_tcp = [s for s in all_ice_servers
             if _first_url(s).startswith("turn:") and "transport=tcp" in _first_url(s)]
 turn_tls = [s for s in all_ice_servers if _first_url(s).startswith("turns:")]
 
-# TEMPORARY DEBUG: pick which TURN entry BOTH the browser and the server use.
-# (Change this only while the stream is stopped.)
+# TEMPORARY DEBUG: pick which TURN entry the SERVER uses (browser always gets the full list).
+# Change this only while the stream is stopped.
 server_mode = st.sidebar.radio(
-    "TURN mode (debug)",
+    "Server TURN mode (debug)",
     ["UDP TURN", "TCP TURN", "TLS TURN (turns:)"],
 )
 chosen = {"UDP TURN": turn_udp, "TCP TURN": turn_tcp, "TLS TURN (turns:)": turn_tls}[server_mode][:1]
 if not chosen:
-    st.warning(f"Metered returned no '{server_mode}' entry; only STUN will be used.")
+    st.warning(f"Metered returned no '{server_mode}' entry; the server will use STUN only.")
 
-ice_servers = stun_entries + chosen
-RTC_CONFIGURATION = {"iceServers": ice_servers}
+server_ice_servers = stun_entries + chosen
+RTC_CONFIGURATION = {"iceServers": all_ice_servers}           # browser: full list
+SERVER_RTC_CONFIGURATION = {"iceServers": server_ice_servers}  # server: one STUN + one TURN
 
-st.caption(f"Mode: {server_mode} | ICE servers in use: {[_first_url(s) for s in ice_servers]}")
-
+_supports_server_cfg = "server_rtc_configuration" in inspect.signature(webrtc_streamer).parameters
+st.caption(
+    f"streamlit-webrtc {getattr(streamlit_webrtc, '__version__', '?')} | "
+    f"separate server config supported: {_supports_server_cfg} | "
+    f"server ICE servers ({server_mode}): {[_first_url(s) for s in server_ice_servers]}"
+)
+if not _supports_server_cfg:
+    st.error(
+        "This streamlit-webrtc version cannot give the server its own TURN config, so the "
+        "server won't use TURN. Upgrade streamlit-webrtc in requirements.txt."
+    )
 
 
 # ---- TEMPORARY DEBUG: server-side TURN self-test (shows results on the page, no logs needed) ----
@@ -357,7 +369,7 @@ if st.sidebar.button("Run server TURN self-test"):
         st.sidebar.write(f"**{icon}** | {r['url']} | {r['seconds']}s | types: {r['types']} {r['error']}")
 
 
-ctx = webrtc_streamer(
+_webrtc_kwargs = dict(
     key="asl-learning-tool",
     mode=WebRtcMode.SENDRECV,
     rtc_configuration=RTC_CONFIGURATION,
@@ -365,6 +377,9 @@ ctx = webrtc_streamer(
     media_stream_constraints={"video": True, "audio": False},
     async_processing=True,
 )
+if _supports_server_cfg:
+    _webrtc_kwargs["server_rtc_configuration"] = SERVER_RTC_CONFIGURATION
+ctx = webrtc_streamer(**_webrtc_kwargs)
 
 label_placeholder = st.empty()
 feedback_placeholder = st.empty()
