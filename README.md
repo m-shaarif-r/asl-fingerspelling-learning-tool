@@ -2,7 +2,7 @@
 
 A real-time American Sign Language (ASL) fingerspelling coach that runs in your browser. Show a letter to your webcam and get instant feedback on whether your hand shape is correct, and tips on how to fix it if it isn't.
 
-**[Try the live demo →](#)** *(update this link once deployed — see [Deployment](#deployment) below)*
+**Try the live demo →** [https://asl-fingerspelling-learning-tool.streamlit.app/](https://asl-fingerspelling-learning-tool.streamlit.app/)
 
 ## Why this project
 

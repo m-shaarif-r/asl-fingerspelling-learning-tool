@@ -1,5 +1,4 @@
 import inspect
-import logging
 import threading
 import time
 
@@ -10,7 +9,6 @@ import numpy as np
 import requests
 import streamlit as st
 import torch
-import streamlit_webrtc
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 # -------------------- LAZY LOAD MODEL + DETECTOR --------------------
@@ -37,6 +35,8 @@ with st.expander("How this works", expanded=False):
 # -------------------- TARGET SIGN SELECTION --------------------
 if "target_label" not in st.session_state:
     st.session_state.target_label = "A"
+    
+st.image("images/ASL_Alphabet.jpg", caption="ASL fingerspelling alphabet reference", use_container_width=True)
 
 st.markdown("### Choose a sign to practice:")
 
@@ -266,108 +266,28 @@ def get_ice_servers():
         return fallback
 
 
-# ---- TEMPORARY DEBUG: server-side WebRTC logging (visible in Manage app -> logs) ----
-_aioice_logger = logging.getLogger("aioice")
-if not _aioice_logger.handlers:
-    _aioice_logger.addHandler(logging.StreamHandler())
-_aioice_logger.setLevel(logging.DEBUG)
-
-
 def _first_url(s):
     u = s["urls"]
     return u if isinstance(u, str) else u[0]
 
 
+# Which TURN entry the SERVER uses: "udp", "tcp" or "tls". All three worked in testing.
+SERVER_TURN_MODE = "udp"
+
 all_ice_servers = get_ice_servers()
 stun_entries = [s for s in all_ice_servers if _first_url(s).startswith("stun:")][:1]
-turn_udp = [s for s in all_ice_servers
-            if _first_url(s).startswith("turn:") and "transport=tcp" not in _first_url(s)]
-turn_tcp = [s for s in all_ice_servers
-            if _first_url(s).startswith("turn:") and "transport=tcp" in _first_url(s)]
-turn_tls = [s for s in all_ice_servers if _first_url(s).startswith("turns:")]
+_turn_by_mode = {
+    "udp": [s for s in all_ice_servers
+            if _first_url(s).startswith("turn:") and "transport=tcp" not in _first_url(s)],
+    "tcp": [s for s in all_ice_servers
+            if _first_url(s).startswith("turn:") and "transport=tcp" in _first_url(s)],
+    "tls": [s for s in all_ice_servers if _first_url(s).startswith("turns:")],
+}
 
-# TEMPORARY DEBUG: pick which TURN entry the SERVER uses (browser always gets the full list).
-# Change this only while the stream is stopped.
-server_mode = st.sidebar.radio(
-    "Server TURN mode (debug)",
-    ["UDP TURN", "TCP TURN", "TLS TURN (turns:)"],
-)
-chosen = {"UDP TURN": turn_udp, "TCP TURN": turn_tcp, "TLS TURN (turns:)": turn_tls}[server_mode][:1]
-if not chosen:
-    st.warning(f"Metered returned no '{server_mode}' entry; the server will use STUN only.")
-
-server_ice_servers = stun_entries + chosen
-RTC_CONFIGURATION = {"iceServers": all_ice_servers}           # browser: full list
-SERVER_RTC_CONFIGURATION = {"iceServers": server_ice_servers}  # server: one STUN + one TURN
-
-_supports_server_cfg = "server_rtc_configuration" in inspect.signature(webrtc_streamer).parameters
-st.caption(
-    f"streamlit-webrtc {getattr(streamlit_webrtc, '__version__', '?')} | "
-    f"separate server config supported: {_supports_server_cfg} | "
-    f"server ICE servers ({server_mode}): {[_first_url(s) for s in server_ice_servers]}"
-)
-if not _supports_server_cfg:
-    st.error(
-        "This streamlit-webrtc version cannot give the server its own TURN config, so the "
-        "server won't use TURN. Upgrade streamlit-webrtc in requirements.txt."
-    )
-
-
-# ---- TEMPORARY DEBUG: server-side TURN self-test (shows results on the page, no logs needed) ----
-def _parse_ice_url(url):
-    scheme, rest = url.split(":", 1)
-    hostport, _, query = rest.partition("?")
-    host, _, port = hostport.rpartition(":")
-    transport = "tcp" if "transport=tcp" in query else "udp"
-    return scheme, host, int(port), transport
-
-
-def _server_turn_test(entry, stun_entry, timeout=15):
-    """Runs FROM THE STREAMLIT SERVER: tries to get candidates using one TURN entry."""
-    import asyncio
-    import aioice
-
-    url = _first_url(entry)
-    scheme, host, port, transport = _parse_ice_url(url)
-    stun_host, stun_port = None, None
-    if stun_entry:
-        _, stun_host, stun_port, _ = _parse_ice_url(_first_url(stun_entry[0]))
-
-    async def run():
-        conn = aioice.Connection(
-            ice_controlling=True,
-            stun_server=(stun_host, stun_port) if stun_host else None,
-            turn_server=(host, port),
-            turn_username=entry.get("username"),
-            turn_password=entry.get("credential"),
-            turn_ssl=(scheme == "turns"),
-            turn_transport=transport,
-        )
-        t0 = time.time()
-        try:
-            await asyncio.wait_for(conn.gather_candidates(), timeout=timeout)
-            types = [c.type for c in conn.local_candidates]
-            return {"url": url, "relay": "relay" in types, "types": types,
-                    "seconds": round(time.time() - t0, 1), "error": ""}
-        except Exception as e:
-            return {"url": url, "relay": False, "types": [],
-                    "seconds": round(time.time() - t0, 1), "error": f"{type(e).__name__}: {e}"}
-        finally:
-            await conn.close()
-
-    return asyncio.run(run())
-
-
-if st.sidebar.button("Run server TURN self-test"):
-    turn_entries = [s for s in all_ice_servers if _first_url(s).startswith(("turn:", "turns:"))]
-    if not turn_entries:
-        st.sidebar.warning("No TURN entries loaded.")
-    for entry in turn_entries:
-        with st.spinner(f"Testing {_first_url(entry)} ..."):
-            r = _server_turn_test(entry, stun_entries)
-        icon = "OK relay" if r["relay"] else "NO relay"
-        st.sidebar.write(f"**{icon}** | {r['url']} | {r['seconds']}s | types: {r['types']} {r['error']}")
-
+# The browser gets the full list; the server gets one STUN + one TURN entry
+# (the server-side WebRTC library only uses the first of each).
+RTC_CONFIGURATION = {"iceServers": all_ice_servers}
+SERVER_RTC_CONFIGURATION = {"iceServers": stun_entries + _turn_by_mode[SERVER_TURN_MODE][:1]}
 
 _webrtc_kwargs = dict(
     key="asl-learning-tool",
@@ -377,8 +297,12 @@ _webrtc_kwargs = dict(
     media_stream_constraints={"video": True, "audio": False},
     async_processing=True,
 )
-if _supports_server_cfg:
+if "server_rtc_configuration" in inspect.signature(webrtc_streamer).parameters:
     _webrtc_kwargs["server_rtc_configuration"] = SERVER_RTC_CONFIGURATION
+else:
+    st.warning("Installed streamlit-webrtc is too old to configure server-side TURN; "
+               "upgrade it in requirements.txt.")
+
 ctx = webrtc_streamer(**_webrtc_kwargs)
 
 label_placeholder = st.empty()
