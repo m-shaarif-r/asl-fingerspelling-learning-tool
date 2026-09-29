@@ -5,6 +5,7 @@ import av
 import cv2
 import mediapipe as mp
 import numpy as np
+import requests
 import streamlit as st
 import torch
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
@@ -237,42 +238,34 @@ def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
 
 # -------------------- WEBCAM STREAM (RUNS IN THE VISITOR'S BROWSER) --------------------
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_ice_servers():
-    """STUN alone can't connect through most cloud/NAT setups (e.g. Streamlit
-    Cloud), so a TURN relay is needed. Provide Metered credentials via
-    Streamlit secrets: METERED_APP_NAME and METERED_API_KEY."""
-    servers = [{"urls": ["stun:stun.l.google.com:19302"]}]
-    try:
-        import requests
+def _fetch_turn_servers(app_name: str, api_key: str):
+    resp = requests.get(
+        f"https://{app_name}.metered.live/api/v1/turn/credentials",
+        params={"apiKey": api_key},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()  # failures raise and are NOT cached
 
+
+def get_ice_servers():
+    fallback = [{"urls": ["stun:stun.l.google.com:19302"]}]
+    try:
         app_name = st.secrets["METERED_APP_NAME"]
         api_key = st.secrets["METERED_API_KEY"]
-        resp = requests.get(
-            f"https://{app_name}.metered.live/api/v1/turn/credentials",
-            params={"apiKey": api_key},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        all_servers = resp.json()
-
-        # aiortc (server side) handles plain UDP TURN best, and a long server
-        # list slows ICE gathering. Keep one STUN and one UDP TURN entry.
-        def first_url(entry):
-            urls = entry["urls"]
-            return urls if isinstance(urls, str) else urls[0]
-
-        stun = [s for s in all_servers if first_url(s).startswith("stun:")][:1]
-        turn = [
-            s for s in all_servers
-            if first_url(s).startswith("turn:") and "transport=tcp" not in first_url(s)
-        ][:1]
-        servers = (stun + turn) or all_servers
     except Exception:
-        pass
-    return servers
+        st.warning("TURN secrets not found, using STUN only (won't work when deployed).")
+        return fallback
+    try:
+        return _fetch_turn_servers(app_name, api_key)
+    except Exception as e:
+        st.warning(f"Could not fetch TURN credentials: {e}")
+        return fallback
 
 
-RTC_CONFIGURATION = {"iceServers": get_ice_servers()}
+ice_servers = get_ice_servers()
+RTC_CONFIGURATION = {"iceServers": ice_servers}
+st.caption(f"ICE servers loaded: {len(ice_servers)}")  # temporary debug line
 
 ctx = webrtc_streamer(
     key="asl-learning-tool",
