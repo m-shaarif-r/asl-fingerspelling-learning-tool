@@ -300,6 +300,63 @@ RTC_CONFIGURATION = {"iceServers": ice_servers}
 st.caption(f"Mode: {server_mode} | ICE servers in use: {[_first_url(s) for s in ice_servers]}")
 
 
+
+# ---- TEMPORARY DEBUG: server-side TURN self-test (shows results on the page, no logs needed) ----
+def _parse_ice_url(url):
+    scheme, rest = url.split(":", 1)
+    hostport, _, query = rest.partition("?")
+    host, _, port = hostport.rpartition(":")
+    transport = "tcp" if "transport=tcp" in query else "udp"
+    return scheme, host, int(port), transport
+
+
+def _server_turn_test(entry, stun_entry, timeout=15):
+    """Runs FROM THE STREAMLIT SERVER: tries to get candidates using one TURN entry."""
+    import asyncio
+    import aioice
+
+    url = _first_url(entry)
+    scheme, host, port, transport = _parse_ice_url(url)
+    stun_host, stun_port = None, None
+    if stun_entry:
+        _, stun_host, stun_port, _ = _parse_ice_url(_first_url(stun_entry[0]))
+
+    async def run():
+        conn = aioice.Connection(
+            ice_controlling=True,
+            stun_server=(stun_host, stun_port) if stun_host else None,
+            turn_server=(host, port),
+            turn_username=entry.get("username"),
+            turn_password=entry.get("credential"),
+            turn_ssl=(scheme == "turns"),
+            turn_transport=transport,
+        )
+        t0 = time.time()
+        try:
+            await asyncio.wait_for(conn.gather_candidates(), timeout=timeout)
+            types = [c.type for c in conn.local_candidates]
+            return {"url": url, "relay": "relay" in types, "types": types,
+                    "seconds": round(time.time() - t0, 1), "error": ""}
+        except Exception as e:
+            return {"url": url, "relay": False, "types": [],
+                    "seconds": round(time.time() - t0, 1), "error": f"{type(e).__name__}: {e}"}
+        finally:
+            await conn.close()
+
+    return asyncio.run(run())
+
+
+if st.sidebar.button("Run server TURN self-test"):
+    turn_entries = [s for s in all_ice_servers if _first_url(s).startswith(("turn:", "turns:"))]
+    if not turn_entries:
+        st.sidebar.warning("No TURN entries loaded.")
+    for entry in turn_entries:
+        with st.spinner(f"Testing {_first_url(entry)} ..."):
+            r = _server_turn_test(entry, stun_entries)
+        icon = "OK relay" if r["relay"] else "NO relay"
+        st.sidebar.write(f"**{icon}** | {r['url']} | {r['seconds']}s | types: {r['types']} {r['error']}")
+
+
 ctx = webrtc_streamer(
     key="asl-learning-tool",
     mode=WebRtcMode.SENDRECV,
